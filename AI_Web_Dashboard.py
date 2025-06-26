@@ -145,8 +145,15 @@ def get_trading_advice(portfolio_df, prob_threshold):
     market_features = calculate_features(market_data, is_market=True)
     is_bull_market = True
     if latest_date in market_features.index:
-        features = market_features.loc[[latest_date]][regime_model.feature_names_in_]
-        if not features.empty: is_bull_market = regime_model.predict(features)[0] == 1
+        # regime_model 欄位修正
+        if isinstance(regime_model, dict):
+            market_model = regime_model['model']
+            market_feature_cols = market_model.feature_names_in_
+        else:
+            market_model = regime_model
+            market_feature_cols = regime_model.feature_names_in_
+        features = market_features.loc[[latest_date]][market_feature_cols]
+        if not features.empty: is_bull_market = market_model.predict(features)[0] == 1
     regime_status = "☀️ 多頭市場 (適宜做多)" if is_bull_market else "🌧️ 空頭市場 (適宜做空或觀望)"
     buy_signals, sell_signals = [], []
     all_stocks = get_stock_list()
@@ -156,7 +163,14 @@ def get_trading_advice(portfolio_df, prob_threshold):
         if df is None or df.empty or df.index.max() < latest_date - timedelta(days=5): continue
         df_feat = calculate_features(df)
         if latest_date not in df_feat.index: continue
-        features_today = df_feat.loc[[latest_date]][stock_model.feature_names_in_]
+        # stock_model 欄位修正
+        if isinstance(stock_model_data, dict):
+            stock_model = stock_model_data['model']
+            stock_feature_cols = stock_model.feature_names_in_
+        else:
+            stock_model = stock_model_data
+            stock_feature_cols = stock_model.feature_names_in_
+        features_today = df_feat.loc[[latest_date]][stock_feature_cols]
         if features_today.empty: continue
         pred_probs = stock_model.predict_proba(features_today)[0]
         pred_label_encoded = np.argmax(pred_probs)
@@ -168,6 +182,8 @@ def get_trading_advice(portfolio_df, prob_threshold):
         elif len(buy_signals) < 20: 
             pred_confidence = pred_probs[pred_label_encoded]
             entry_price = df_feat.loc[latest_date, 'next_day_open']
+            if isinstance(entry_price, pd.Series):
+                entry_price = entry_price.iloc[0]
             if pd.notna(entry_price):
                 if is_bull_market and pred_label == 1 and pred_confidence > prob_threshold: buy_signals.append({'stock_id': stock_id, 'signal': '做多', 'confidence': f"{pred_confidence:.0%}", 'entry_price': entry_price})
                 elif not is_bull_market and pred_label == -1 and pred_confidence > prob_threshold: buy_signals.append({'stock_id': stock_id, 'signal': '放空', 'confidence': f"{pred_confidence:.0%}", 'entry_price': entry_price})

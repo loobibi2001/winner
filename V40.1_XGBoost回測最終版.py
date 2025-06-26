@@ -43,15 +43,27 @@ REGIME_MODEL_PATH = os.path.join(BASE_PATH, "regime_model.joblib")
 MARKET_INDEX_ID = "TAIEX"
 
 # --- 策略參數 ---
-PREDICTION_PROB_THRESHOLD = 0.45 # 模型預測機率門檻，低於此值不進行交易
+PREDICTION_PROB_THRESHOLD = 0.35 # 模型預測機率門檻，降低以增加交易機會
 ATR_MULTIPLIER = 2.0             # ATR止損/止盈乘數
-MAX_OPEN_POSITIONS = 10          # 最大同時持倉股票數量
+MAX_OPEN_POSITIONS = 15          # 最大同時持倉股票數量，增加以提高交易頻率
 
 # --- 常量 ---
 TRANSACTION_FEE_RATE = 0.001425 # 交易手續費率 (萬分之1.425)
 TRANSACTION_TAX_RATE = 0.003    # 交易稅率 (千分之3)
 INITIAL_CAPITAL = 10_000_000    # 初始資金
 ANNUAL_TRADING_DAYS = 252       # 年化交易日數
+
+# === 新增風控參數 ===
+MAX_LOSS_PER_TRADE = 0.10  # 單筆最大虧損10%
+TAKE_PROFIT = 0.10        # 固定停利10%
+USE_RSI_FILTER = True     # 是否啟用RSI輔助
+RSI_LONG_THRESHOLD = 35   # RSI低於此值才考慮做多
+RSI_SHORT_THRESHOLD = 65  # RSI高於此值才考慮做空
+
+# === 新增持倉與回撤風控參數 ===
+MAX_POSITION_PCT = 0.10   # 單一股票最大持倉比例10%
+MAX_DRAWDOWN_PCT = 0.30   # 組合最大回撤警戒30%
+drawdown_triggered = False
 
 # --- 資料類別 ---
 @dataclass
@@ -163,14 +175,41 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
 
     # 從模型中獲取特徵名稱，確保使用的特徵與訓練時一致
     stock_feature_cols = stock_model.feature_names_in_
-    market_feature_cols = regime_model.feature_names_in_
+    # 處理新格式的市場模型（可能是字典格式）
+    if isinstance(regime_model, dict):
+        market_model = regime_model['model']
+        market_feature_cols = market_model.feature_names_in_
+    else:
+        market_model = regime_model
+        market_feature_cols = regime_model.feature_names_in_
 
     cash, positions, trades_log = INITIAL_CAPITAL, {}, []
-    # 創建一個包含所有交易日期的索引，從最早數據到最新數據的下一天
-    # 這裡的 start 應該從所有數據中最早的日期開始，結束於最近的日期
-    # 為了簡化，先使用固定日期範圍，但實際應動態確定
-    all_dates = pd.date_range(start="2000-01-01", end=datetime.now().strftime('%Y-%m-%d'), freq='B')
+    
+    # 修正：動態確定實際的數據日期範圍
+    all_stock_dates = []
+    for stock_id, df in all_stock_data.items():
+        if not df.empty:
+            all_stock_dates.extend(df.index.tolist())
+    
+    if not all_stock_dates:
+        logger.error("沒有找到任何股票數據，無法執行回測")
+        return None
+    
+    # 找出所有股票數據的日期範圍
+    min_date = min(all_stock_dates)
+    max_date = max(all_stock_dates)
+    
+    # 創建只包含實際數據日期的權益曲線
+    all_dates = pd.date_range(start=min_date, end=max_date, freq='B')
     equity_curve = pd.Series(index=all_dates, dtype=float)
+    
+    # 初始化權益曲線的起始值
+    equity_curve.iloc[0] = INITIAL_CAPITAL
+
+    # 添加統計變數
+    bear_market_days = 0
+    short_attempts = 0
+    short_executed = 0
 
     logger.info("開始執行回測...")
     for current_date in tqdm.tqdm(equity_curve.index, desc="執行回測"):
@@ -180,33 +219,52 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
             features = market_features.loc[[current_date]][market_feature_cols]
             if not features.empty:
                 # 預測市場情勢，將編碼後的結果轉換回原始標籤
-                pred_regime_encoded = regime_model.predict(features)[0]
+                pred_regime_encoded = market_model.predict(features)[0]
                 is_bull_market = (pred_regime_encoded == 1) # 1通常代表牛市
+                
+                # 統計熊市天數
+                if not is_bull_market:
+                    bear_market_days += 1
+                
+                # 添加調試信息，每1000天輸出一次市場情勢
+                if equity_curve.index.get_loc(current_date) % 1000 == 0:
+                    logger.info(f"日期: {current_date}, 市場情勢: {'牛市' if is_bull_market else '熊市'}, 預測編碼: {pred_regime_encoded}")
 
         # 2. 處理現有持倉 (平倉邏輯)
         # 迭代持倉副本，以避免在迭代過程中修改字典
         for stock_id in list(positions.keys()):
             pos = positions.get(stock_id)
-            # 檢查數據可用性，如果當前日期沒有該股票的數據，則跳過處理
             if not pos or stock_id not in all_stock_data or current_date not in all_stock_data[stock_id].index:
                 continue
 
             exit_reason, row = None, all_stock_data[stock_id].loc[current_date]
+            limit_up = row['limit_up']
+            limit_down = row['limit_down']
 
-            # 取得漲跌停價
-            limit_up = row['limit_up']   # 當日漲停價
-            limit_down = row['limit_down'] # 當日跌停價
+            # === 新增最大虧損與停利判斷 ===
+            if pos['direction'] == 'long':
+                if float(row['low']) <= pos['stop_loss']:
+                    exit_reason = 'StopLoss'
+                elif float(row['close']) <= pos['entry_price'] * (1 - MAX_LOSS_PER_TRADE):
+                    exit_reason = 'MaxLoss'
+                elif float(row['close']) >= pos['entry_price'] * (1 + TAKE_PROFIT):
+                    exit_reason = 'TakeProfit'
+            elif pos['direction'] == 'short':
+                if float(row['high']) >= pos['stop_loss']:
+                    exit_reason = 'StopLoss'
+                elif float(row['close']) >= pos['entry_price'] * (1 + MAX_LOSS_PER_TRADE):
+                    exit_reason = 'MaxLoss'
+                elif float(row['close']) <= pos['entry_price'] * (1 - TAKE_PROFIT):
+                    exit_reason = 'TakeProfit'
 
-            # 檢查止損條件
-            if pos['direction'] == 'long' and row['low'] <= pos['stop_loss']:
-                exit_reason = 'StopLoss'
-            elif pos['direction'] == 'short' and row['high'] >= pos['stop_loss']:
-                exit_reason = 'StopLoss'
-            # 檢查市場情勢反轉條件
-            elif pos['direction'] == 'long' and not is_bull_market:
-                exit_reason = 'Regime_Exit'
-            elif pos['direction'] == 'short' and is_bull_market:
-                exit_reason = 'Regime_Exit'
+            # === 移動停損 ===
+            atr = row['atr_14'] if 'atr_14' in row else None
+            current_price = row['close']
+            if atr and not pd.isna(atr):
+                if pos['direction'] == 'long':
+                    pos['stop_loss'] = max(pos['stop_loss'], current_price - atr * ATR_MULTIPLIER)
+                elif pos['direction'] == 'short':
+                    pos['stop_loss'] = min(pos['stop_loss'], current_price + atr * ATR_MULTIPLIER)
 
             if exit_reason:
                 # 平倉價格使用次日開盤價，如果沒有則使用當日收盤價
@@ -218,8 +276,8 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
                         logger.warning(f"{stock_id} {current_date}: 無法找到有效平倉價格，跳過平倉。")
                         continue
 
-                # 平倉時
-                if pos['direction'] == 'long' and (exit_price >= limit_down and exit_price <= limit_up):
+                # 平倉時 - 修正：允許多頭和空頭交易平倉
+                if (exit_price >= limit_down and exit_price <= limit_up):
                     # 可成交
                     pnl = 0
                     if pos['direction'] == 'long':
@@ -252,30 +310,35 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
                     continue
 
         # 3. 考慮開新倉邏輯 (如果還有開倉額度)
-        if len(positions) < MAX_OPEN_POSITIONS:
-            # 遍歷所有股票，尋找交易機會
+        if len(positions) < MAX_OPEN_POSITIONS and not drawdown_triggered:
             for stock_id, df_feat in stock_features.items():
                 if len(positions) >= MAX_OPEN_POSITIONS or stock_id in positions:
-                    continue # 已達最大持倉或該股票已有持倉
-
-                # 檢查當前日期是否有足夠的特徵數據
+                    continue
                 if current_date not in df_feat.index:
                     continue
-
                 features_today = df_feat.loc[[current_date]][stock_feature_cols]
                 if features_today.empty or features_today.isnull().any().any():
-                    continue # 特徵數據不完整
-
-                # 預測股票方向
+                    continue
                 pred_probs = stock_model.predict_proba(features_today)[0]
-                # 找到機率最高的類別及其原始標籤
                 pred_label_encoded = np.argmax(pred_probs)
-                pred_label = stock_label_encoder.inverse_transform([pred_label_encoded])[0] # 轉換回 -1, 0, 1
+                pred_label = stock_label_encoder.inverse_transform([pred_label_encoded])[0]
                 pred_confidence = pred_probs[pred_label_encoded]
+                rsi_today = df_feat.loc[current_date, 'rsi_14'] if 'rsi_14' in df_feat.columns else 50
 
-                # 判斷是否滿足交易條件 (市場情勢 + 預測方向 + 信心門檻)
-                should_trade_long = is_bull_market and (pred_label == 1) and (pred_confidence > PREDICTION_PROB_THRESHOLD)
-                should_trade_short = (not is_bull_market) and (pred_label == -1) and (pred_confidence > PREDICTION_PROB_THRESHOLD)
+                # === 優化熊市做空條件 ===
+                if is_bull_market:
+                    should_trade_long = (pred_label == 1) and (pred_confidence > PREDICTION_PROB_THRESHOLD)
+                    should_trade_short = False
+                else:
+                    should_trade_long = False
+                    should_trade_short = (pred_label == -1) and (pred_confidence > PREDICTION_PROB_THRESHOLD)
+
+                # === RSI輔助 ===
+                if USE_RSI_FILTER:
+                    if should_trade_long and rsi_today > RSI_LONG_THRESHOLD:
+                        should_trade_long = False
+                    if should_trade_short and rsi_today < RSI_SHORT_THRESHOLD:
+                        should_trade_short = False
 
                 if should_trade_long or should_trade_short:
                     entry_price, atr = df_feat.loc[current_date, ['next_day_open', 'atr_14']]
@@ -302,6 +365,17 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
                     
                     if shares < 1000: # 最少購買1000股 (或設定一個更低的最小交易單位)
                         logger.debug(f"{stock_id} {current_date}: 計算股數 {shares} 低於最小交易單位，跳過開倉。")
+                        continue
+
+                    # === 單一股票最大持倉比例 ===
+                    portfolio_value = cash + sum(p.get('value', 0) for p in positions.values())
+                    max_position_value = portfolio_value * MAX_POSITION_PCT
+                    # 計算現有持倉
+                    current_position_value = 0
+                    if stock_id in positions:
+                        current_position_value = positions[stock_id]['shares'] * positions[stock_id]['entry_price']
+                    # 檢查單一股票最大持倉
+                    if (shares * entry_price + current_position_value) > max_position_value:
                         continue
 
                     if should_trade_long:
@@ -336,31 +410,64 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
                             'value': 0 # 初始化持倉市值
                         }
                         cash += revenue
+                        short_executed += 1
                         logger.debug(f"{stock_id} {current_date}: 開立空頭部位。股數: {shares}, 進場價: {entry_price:.2f}, 止損: {stop_loss_price:.2f}")
 
         # 4. 更新每日權益曲線
         holdings_value = 0
         for stock_id, pos in positions.items():
-            # 獲取當前持倉股票的最新價格
-            current_price = all_stock_data[stock_id].loc[current_date, 'close'] if current_date in all_stock_data[stock_id].index else pos['entry_price']
-            
-            if pd.isna(current_price) or current_price <= 0:
-                # 如果無法獲取有效價格，使用前一天的價格或入場價格進行估計
-                logger.warning(f"無法獲取 {stock_id} 在 {current_date} 的有效價格，使用入場價 {pos['entry_price']:.2f} 估計。")
-                current_price = pos['entry_price'] # 使用入場價作為估計
-
+            if current_date in all_stock_data[stock_id].index:
+                current_price = all_stock_data[stock_id].loc[current_date, 'close']
+            else:
+                current_price = pos['entry_price']
+            try:
+                if pd.isna(current_price) or float(current_price) <= 0:
+                    current_price = pos['entry_price']
+            except (ValueError, TypeError):
+                current_price = pos['entry_price']
             if pos.get('direction') == 'long':
-                # 多頭部位市值：股數 * 當前價格
                 pos['value'] = pos['shares'] * current_price
             elif pos.get('direction') == 'short':
-                # 空頭部位市值：原始賣出價值 + 未實現盈虧
-                # 空頭部位價值 = 原始賣出所得 + (賣出價 - 當前價) * 股數
                 pos['value'] = (pos['shares'] * pos['entry_price']) + (pos['entry_price'] - current_price) * pos['shares']
             holdings_value += pos.get('value', 0)
-        
         equity_curve.loc[current_date] = cash + holdings_value
 
+        # === 檢查組合最大回撤 ===
+        peak = equity_curve[:current_date].max() if not pd.isna(equity_curve[:current_date]).all() else INITIAL_CAPITAL
+        if peak > 0:
+            drawdown = (equity_curve.loc[current_date] - peak) / peak
+            if drawdown <= -MAX_DRAWDOWN_PCT and not drawdown_triggered:
+                drawdown_triggered = True
+                logger.warning(f"組合最大回撤超過{MAX_DRAWDOWN_PCT*100:.0f}%，{current_date} 強制平倉並停止新開倉！")
+                # 強制平倉所有持倉
+                for stock_id in list(positions.keys()):
+                    pos = positions[stock_id]
+                    row = all_stock_data[stock_id].loc[current_date]
+                    exit_price = row['close']
+                    pnl = (exit_price - pos['entry_price']) * pos['shares'] if pos['direction']=='long' else (pos['entry_price'] - exit_price) * pos['shares']
+                    cash += exit_price * pos['shares'] * (1 - TRANSACTION_FEE_RATE - TRANSACTION_TAX_RATE) if pos['direction']=='long' else -exit_price * pos['shares'] * (1 + TRANSACTION_FEE_RATE)
+                    trades_log.append({
+                        'stock_id': stock_id,
+                        'direction': pos['direction'],
+                        'entry_date': pos['entry_date'],
+                        'entry_price': pos['entry_price'],
+                        'shares': pos['shares'],
+                        'exit_date': current_date,
+                        'exit_price': exit_price,
+                        'pnl_dollar_gross': pnl,
+                        'exit_reason': 'MaxDrawdownForceExit'
+                    })
+                    del positions[stock_id]
+
     logger.info("回測執行完畢，開始計算績效指標。")
+    
+    # 輸出統計信息
+    total_days = len(equity_curve)
+    logger.info(f"總回測天數: {total_days}")
+    logger.info(f"熊市天數: {bear_market_days} ({bear_market_days/total_days*100:.2f}%)")
+    logger.info(f"空頭交易嘗試次數: {short_attempts}")
+    logger.info(f"空頭交易執行次數: {short_executed}")
+
     # 5. 計算績效指標 (KPIs)
     kpis = {}
     trades_df = pd.DataFrame(trades_log)
@@ -412,6 +519,14 @@ def run_xgboost_long_short_backtest(stock_model_data, regime_model, all_stock_da
         kpis['獲利交易次數'] = len(wins)
         kpis['虧損交易次數'] = len(losses)
         kpis['勝率 (%)'] = (len(wins) / len(trades_df) * 100) if len(trades_df) > 0 else 0.0
+        
+        # 新增：多空交易統計
+        long_trades = trades_df[trades_df['direction'] == 'long']
+        short_trades = trades_df[trades_df['direction'] == 'short']
+        kpis['多頭交易次數'] = len(long_trades)
+        kpis['空頭交易次數'] = len(short_trades)
+        kpis['多頭勝率 (%)'] = (len(long_trades[long_trades['pnl_dollar_gross'] > 0]) / len(long_trades) * 100) if len(long_trades) > 0 else 0.0
+        kpis['空頭勝率 (%)'] = (len(short_trades[short_trades['pnl_dollar_gross'] > 0]) / len(short_trades) * 100) if len(short_trades) > 0 else 0.0
 
         # --- 新增：統計個股損益，繪製最賺/最虧個股K線圖 ---
         # 統計每檔個股總損益
@@ -504,6 +619,10 @@ def format_kpis_for_display(kpis: Dict[str, Any]) -> str:
     lines.append(f"{'獲利交易次數':<20}: {kpis.get('獲利交易次數', 0)}")
     lines.append(f"{'虧損交易次數':<20}: {kpis.get('虧損交易次數', 0)}")
     lines.append(f"{'勝率 (%)':<20}: {kpis.get('勝率 (%)', 0):.2f}")
+    lines.append(f"{'多頭交易次數':<20}: {kpis.get('多頭交易次數', 0)}")
+    lines.append(f"{'空頭交易次數':<20}: {kpis.get('空頭交易次數', 0)}")
+    lines.append(f"{'多頭勝率 (%)':<20}: {kpis.get('多頭勝率 (%)', 0):.2f}")
+    lines.append(f"{'空頭勝率 (%)':<20}: {kpis.get('空頭勝率 (%)', 0):.2f}")
     return "\n".join(lines)
 
 def main():

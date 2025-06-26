@@ -26,9 +26,23 @@ LIST_PATH = os.path.join(BASE_DIR, "stock_list.txt")
 MARKET_INDEX_ID = "TAIEX"
 DOWNLOAD_START_DATE = "1900-01-01"
 
-def download_data(api: FinMindApi, dataset: str, stock_id: str):
+def download_data(api: FinMindApi, dataset: str, stock_id: str, file_path: str = None):
     start_date = DOWNLOAD_START_DATE
     end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # 檢查檔案是否已存在且是最新的
+    if file_path and os.path.exists(file_path):
+        try:
+            existing_df = pd.read_parquet(file_path)
+            if not existing_df.empty:
+                last_date = existing_df.index.max()
+                if isinstance(last_date, pd.Timestamp):
+                    # 如果最後更新日期是今天或昨天，跳過更新
+                    if last_date.date() >= datetime.now().date() - timedelta(days=1):
+                        return pd.DataFrame()  # 返回空DataFrame表示跳過
+        except Exception as e:
+            logger.warning(f"檢查 {stock_id} 的 {dataset} 檔案時發生錯誤: {e}")
+    
     try:
         df = api.get_data(dataset=dataset, data_id=stock_id, start_date=start_date, end_date=end_date)
         return df if df is not None and not df.empty else pd.DataFrame()
@@ -55,8 +69,10 @@ def main():
 
     for stock_id in tqdm.tqdm(stock_list, desc="更新數據進度"):
         time.sleep(0.2)
+        
         # 1. 處理股價數據
-        df_price = download_data(api, "TaiwanStockPrice", stock_id)
+        price_file_path = os.path.join(PRICE_DIR, f"{stock_id}_history.parquet")
+        df_price = download_data(api, "TaiwanStockPrice", stock_id, price_file_path)
         if not df_price.empty:
             df_price = df_price.rename(columns={'max': 'high', 'min': 'low', 'Trading_Volume': 'volume'})
             required_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
@@ -64,21 +80,29 @@ def main():
             df_price['date'] = pd.to_datetime(df_price['date'])
             df_price['volume'] = pd.to_numeric(df_price['volume'], errors='coerce').fillna(0).astype(np.int64)
             df_price = df_price.set_index('date')
-            df_price.to_parquet(os.path.join(PRICE_DIR, f"{stock_id}_history.parquet"))
+            df_price.to_parquet(price_file_path)
+        else:
+            logger.info(f"跳過 {stock_id} 股價數據更新（已是最新）")
 
         # 2. 處理法人買賣超數據
-        df_investor = download_data(api, "TaiwanStockInstitutionalInvestorsBuySell", stock_id)
+        investor_file_path = os.path.join(INVESTOR_DIR, f"{stock_id}.parquet")
+        df_investor = download_data(api, "TaiwanStockInstitutionalInvestorsBuySell", stock_id, investor_file_path)
         if not df_investor.empty:
             df_investor['date'] = pd.to_datetime(df_investor['date'])
             df_investor.set_index('date', inplace=True)
-            df_investor.to_parquet(os.path.join(INVESTOR_DIR, f"{stock_id}.parquet"))
+            df_investor.to_parquet(investor_file_path)
+        else:
+            logger.info(f"跳過 {stock_id} 法人買賣超數據更新（已是最新）")
         
         # 3. 處理股權分散數據
-        df_holder = download_data(api, "TaiwanStockShareholding", stock_id)
+        holder_file_path = os.path.join(HOLDER_DIR, f"{stock_id}.parquet")
+        df_holder = download_data(api, "TaiwanStockShareholding", stock_id, holder_file_path)
         if not df_holder.empty:
             df_holder['date'] = pd.to_datetime(df_holder['date'])
             df_holder.set_index('date', inplace=True)
-            df_holder.to_parquet(os.path.join(HOLDER_DIR, f"{stock_id}.parquet"))
+            df_holder.to_parquet(holder_file_path)
+        else:
+            logger.info(f"跳過 {stock_id} 股權分散數據更新（已是最新）")
             
     logger.info("\n數據更新任務完成！")
 

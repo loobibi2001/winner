@@ -12,9 +12,9 @@
 import os
 import sys
 import subprocess
-import time
 import logging
-from datetime import datetime
+import time
+from tqdm import tqdm
 
 # 設定路徑
 BASE_PATH = r"D:\飆股篩選\winner"
@@ -24,108 +24,115 @@ SCRIPTS_DIR = os.path.join(BASE_PATH, "scripts")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def run_script(script_name, description):
-    """執行腳本並記錄結果"""
-    script_path = os.path.join(SCRIPTS_DIR, script_name)
+def run_script(script_path, description):
+    """執行腳本並即時顯示輸出"""
+    logger.info(f"開始執行: {description}")
     
-    if not os.path.exists(script_path):
-        logger.error(f"腳本不存在: {script_path}")
+    # 構建完整路徑
+    if not os.path.isabs(script_path):
+        full_path = os.path.join(BASE_PATH, "scripts", script_path)
+    else:
+        full_path = script_path
+    
+    logger.info(f"腳本路徑: {full_path}")
+    
+    if not os.path.exists(full_path):
+        logger.error(f"腳本不存在: {full_path}")
         return False
     
-    logger.info(f"開始執行: {description}")
-    logger.info(f"腳本路徑: {script_path}")
-    
     try:
-        # 使用subprocess執行腳本
-        result = subprocess.run([sys.executable, script_path], 
-                              capture_output=True, 
-                              text=True, 
-                              cwd=BASE_PATH)
+        # 直接執行，不捕獲輸出，讓輸出直接顯示到控制台
+        result = subprocess.run(
+            [sys.executable, full_path], 
+            cwd=BASE_PATH,
+            timeout=1800  # 30分鐘超時
+        )
         
         if result.returncode == 0:
-            logger.info(f"✅ {description} 執行成功")
-            if result.stdout:
-                logger.info(f"輸出: {result.stdout}")
+            logger.info(f"✓ {description} 執行成功")
             return True
         else:
-            logger.error(f"❌ {description} 執行失敗")
-            logger.error(f"錯誤: {result.stderr}")
+            logger.error(f"✗ {description} 執行失敗，返回碼: {result.returncode}")
             return False
             
+    except subprocess.TimeoutExpired:
+        logger.error(f"✗ {description} 執行超時")
+        return False
     except Exception as e:
-        logger.error(f"❌ 執行 {description} 時發生錯誤: {e}")
+        logger.error(f"✗ 執行 {description} 時發生錯誤: {e}")
         return False
 
 def main():
-    """主函數"""
-    logger.info("===== 一鍵自動化訓練與回測開始 =====")
-    start_time = time.time()
+    """主要執行函數，帶有整體進度條"""
+    print("=" * 80)
+    print("            📈 AI股票交易系統 - 完整訓練與回測流程")
+    print("=" * 80)
     
-    # 確保scripts目錄存在
-    if not os.path.exists(SCRIPTS_DIR):
-        logger.error(f"Scripts目錄不存在: {SCRIPTS_DIR}")
-        return
+    # 定義所有步驟
+    steps = [
+        ("update_all_data.py", "更新股票資料", 30),
+        ("../V40.1_XGBoost模型訓練腳本_修正版.py", "XGBoost模型訓練", 25),
+        ("../V40.1_XGBoost回測最終版.py", "執行回測分析", 25),
+        ("../AI_Web_Dashboard.py", "啟動交易儀表板", 20)
+    ]
     
-    # 步驟1: 更新資料
-    logger.info("\n📊 步驟1: 更新股票資料")
-    if not run_script("update_all_data.py", "資料更新"):
-        logger.warning("資料更新失敗，但繼續執行後續步驟")
+    total_steps = len(steps)
+    overall_start_time = time.time()
     
-    # 步驟2: 詢問是否進行超參數調優
-    print("\n" + "="*50)
-    print("🤖 模型訓練選項:")
-    print("1. 標準訓練 (快速)")
-    print("2. 超參數調優 (較慢但效果更好)")
-    print("="*50)
+    # 整體進度條
+    with tqdm(total=100, desc="整體進度", unit="%", 
+              bar_format="{desc}: {percentage:3.0f}%|{bar}| {elapsed} < {remaining}") as pbar:
+        
+        current_progress = 0
+        
+        for i, (script_path, description, weight) in enumerate(steps):
+            # 更新進度條描述
+            pbar.set_description(f"[{i+1}/{total_steps}] {description}")
+            
+            step_start_time = time.time()
+            logger.info(f"\n{'='*60}")
+            logger.info(f"步驟 {i+1}/{total_steps}: {description}")
+            logger.info(f"{'='*60}")
+            
+            # 執行步驟
+            success = run_script(script_path, description)
+            
+            step_elapsed = time.time() - step_start_time
+            logger.info(f"步驟耗時: {step_elapsed/60:.1f} 分鐘")
+            
+            if not success:
+                pbar.set_description(f"❌ 失敗: {description}")
+                logger.error(f"步驟 {i+1} 失敗，流程中止")
+                return False
+            
+            # 更新進度條
+            current_progress += weight
+            pbar.update(weight)
+            pbar.set_description(f"✓ 完成: {description}")
+            time.sleep(0.5)  # 讓用戶看到完成狀態
+        
+        # 完成
+        pbar.set_description("🎉 所有步驟完成")
     
-    while True:
-        choice = input("請選擇訓練方式 (1 或 2): ").strip()
-        if choice in ['1', '2']:
-            break
-        print("請輸入 1 或 2")
+    total_elapsed = time.time() - overall_start_time
     
-    # 步驟2: 訓練模型
-    logger.info("\n🤖 步驟2: 訓練模型")
-    if choice == '1':
-        # 標準訓練
-        if not run_script("train_standard.py", "標準模型訓練"):
-            logger.error("模型訓練失敗，停止執行")
-            return
-    else:
-        # 超參數調優
-        if not run_script("auto_hyperopt.py", "超參數調優訓練"):
-            logger.error("超參數調優失敗，停止執行")
-            return
+    print("\n" + "=" * 80)
+    print("                        🎉 流程執行完成！")
+    print("=" * 80)
+    print(f"總耗時: {total_elapsed/60:.1f} 分鐘")
+    print("📊 您現在可以：")
+    print("   1. 查看 AI_Web_Dashboard 進行交易分析")
+    print("   2. 檢視 runs/ 目錄下的回測結果")
+    print("   3. 查看訓練好的模型檔案 (*.joblib)")
+    print("=" * 80)
     
-    # 步驟3: 執行回測
-    logger.info("\n📈 步驟3: 執行回測")
-    if not run_script("backtest_auto.py", "自動回測"):
-        logger.error("回測執行失敗")
-        return
-    
-    # 步驟4: 啟動Web Dashboard
-    logger.info("\n🌐 步驟4: 啟動Web Dashboard")
-    dashboard_path = os.path.join(BASE_PATH, "AI_Web_Dashboard.py")
-    if os.path.exists(dashboard_path):
-        logger.info("正在啟動Web Dashboard...")
-        try:
-            # 啟動dashboard (不等待完成，讓它在背景運行)
-            subprocess.Popen([sys.executable, dashboard_path], cwd=BASE_PATH)
-            logger.info("✅ Web Dashboard 已啟動")
-            logger.info("🌐 請在瀏覽器中開啟: http://localhost:8501")
-        except Exception as e:
-            logger.error(f"❌ 啟動Web Dashboard失敗: {e}")
-    else:
-        logger.warning(f"Web Dashboard檔案不存在: {dashboard_path}")
-    
-    # 完成
-    total_time = time.time() - start_time
-    logger.info(f"\n🎉 一鍵自動化完成！總耗時: {total_time/60:.2f} 分鐘")
-    logger.info("📁 所有結果已保存在winner目錄中")
-    logger.info("📊 可以查看以下檔案:")
-    logger.info("   - 回測結果: runs/ 目錄")
-    logger.info("   - 模型檔案: *.joblib")
-    logger.info("   - 調優報告: *_optimization_report.json (如果選擇超參數調優)")
+    return True
 
 if __name__ == "__main__":
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️ 用戶中斷執行")
+    except Exception as e:
+        print(f"\n\n💥 發生未預期錯誤: {e}")
+        logger.error(f"主程式錯誤: {e}") 

@@ -35,7 +35,15 @@ def find_candidate_files():
         "stock_list.txt",
         "requirements.txt",
         "README.md",
-        "data_integrity_report.txt"
+        "data_integrity_report.txt",
+        "交易助手.bat",           # 交易助手主程式
+        "快速啟動儀表板.bat",      # 快速啟動儀表板
+    }
+    
+    # 排除的檔案類型
+    exclude_extensions = {
+        ".bat",                   # 所有批次檔案
+        ".py"                     # Python 腳本檔案
     }
     
     exclude_dirs = {
@@ -63,7 +71,7 @@ def find_candidate_files():
             
             # 檢查是否為排除檔案
             filename = os.path.basename(file_path)
-            if filename in exclude_files:
+            if filename in exclude_files or any(filename.endswith(ext) for ext in exclude_extensions):
                 continue
             
             # 取得檔案大小

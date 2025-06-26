@@ -22,6 +22,7 @@ def process_stock(stock_id):
         api.login_by_token(api_token=finmind_api_token)
         file_path = os.path.join(stock_folder, f"{stock_id}_history.csv")
         parquet_path = file_path.replace('.csv', '.parquet')
+        
         # 讀取現有檔案，決定起始日
         if os.path.exists(file_path):
             try:
@@ -29,19 +30,29 @@ def process_stock(stock_id):
                 last_date_in_file = old_df['date'].max()
                 if isinstance(last_date_in_file, pd.Series):
                     last_date_in_file = last_date_in_file.iloc[0]
+                    
+                # 檢查是否已經是最新資料（今天或昨天）
+                if pd.notnull(last_date_in_file):
+                    last_date = pd.to_datetime(last_date_in_file).date()
+                    if last_date >= today - timedelta(days=1):  # 如果是今天或昨天，跳過更新
+                        return stock_id, "already_latest", f"資料已是最新 ({last_date})", 0
+                        
             except Exception:
                 last_date_in_file = None
         else:
             last_date_in_file = None
+            
         # 決定下載起始日，確保是 str
         if last_date_in_file is not None and pd.notnull(last_date_in_file):
             start_date = str(last_date_in_file)
         else:
             start_date = default_start_date_for_missing
+            
         # 下載新資料
         new_df = api.taiwan_stock_daily(stock_id=stock_id, start_date=start_date, end_date=str(today))
         if new_df.empty:
             return stock_id, "already_latest", "無新資料", 0
+            
         # 欄位對應
         new_df = new_df.rename(columns={
             'date': 'date',
@@ -54,6 +65,7 @@ def process_stock(stock_id):
         })
         cols_to_save = [col for col in ['date', 'Open', 'High', 'Low', 'Close', 'Volume'] if col in new_df.columns]
         new_df_to_save = new_df[cols_to_save]
+        
         # 存檔
         if os.path.exists(file_path) and last_date_in_file is not None:
             new_df_to_save.to_csv(file_path, mode='a', header=False, index=False, encoding='utf-8')
@@ -119,14 +131,14 @@ def main():
         print(f"!!!!!! 讀取 {stock_list_file_path} 時發生嚴重錯誤: {e} !!!!!!")
         exit()
 
-    # --- 4進程並行下載 ---
-    print(f"\n--- 開始使用 4 進程並行檢查並更新/下載 {len(stock_ids_to_update)} 支股票/指數資料 ---")
+    # --- 8進程並行下載 ---
+    print(f"\n--- 開始使用 8 進程並行檢查並更新/下載 {len(stock_ids_to_update)} 支股票/指數資料 ---")
 
     # 統計變數
     updated_count, newly_downloaded_count, already_latest_count, error_count = 0, 0, 0, 0
 
-    # 使用 4 進程並行處理
-    with mp.Pool(processes=4) as pool:
+    # 使用 8 進程並行處理
+    with mp.Pool(processes=8) as pool:
         results = pool.imap_unordered(process_stock, stock_ids_to_update)
         
         for i, (stock_id, status, message, data_count) in enumerate(results):

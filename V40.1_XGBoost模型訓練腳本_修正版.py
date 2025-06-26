@@ -167,7 +167,7 @@ def create_stock_labels(df: pd.DataFrame, future_days: int, buy_threshold: float
 def create_market_labels(df: pd.DataFrame, future_days: int, bull_threshold: float) -> pd.Series:
     """
     創建市場情勢標籤
-    修正：確保標籤平衡
+    修正：使用更合理的牛市/熊市判斷標準
     """
     if len(df) <= future_days: 
         return pd.Series(dtype=int)
@@ -175,8 +175,11 @@ def create_market_labels(df: pd.DataFrame, future_days: int, bull_threshold: flo
     df['future_close'] = df['close'].shift(-future_days)
     df['future_return'] = (df['future_close'] - df['close']) / df['close']
     
-    labels = pd.Series(0, index=df.index, dtype=int)  # 0: 熊市
-    labels[df['future_return'] >= bull_threshold] = 1  # 1: 牛市
+    # 使用分位數來平衡標籤分布
+    # 前40%為熊市，後60%為牛市，更符合台股長期多頭特性
+    labels = pd.Series(1, index=df.index, dtype=int)  # 預設為牛市
+    bear_threshold = df['future_return'].quantile(0.4)  # 40%分位數作為熊市門檻
+    labels[df['future_return'] <= bear_threshold] = 0  # 0: 熊市
     
     return labels.dropna()
 
@@ -210,7 +213,7 @@ def train_models():
         # 檢查數據長度是否足夠
         if len(df_raw) < 100:  # 至少需要100筆資料來計算技術指標
             continue
-            
+        
         df_feat = calculate_features(df_raw, is_market=False)
         labels = create_stock_labels(df_raw, FUTURE_DAYS_FOR_STOCK_LABEL, STOCK_BUY_THRESHOLD, STOCK_SELL_THRESHOLD)
         

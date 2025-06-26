@@ -34,7 +34,7 @@ logger = logging.getLogger('')
 logger.addHandler(console_handler)
 
 BASE_DIR = r"D:\飆股篩選\winner"
-DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), "StockData_Parquet")
+DATA_DIR = os.path.join(BASE_DIR, "StockData_Parquet")
 LIST_PATH = os.path.join(BASE_DIR, "stock_list.txt")
 STOCK_MODEL_SAVE_PATH = os.path.join(BASE_DIR, "xgboost_long_short_model.joblib")
 REGIME_MODEL_SAVE_PATH = os.path.join(BASE_DIR, "regime_model.joblib")

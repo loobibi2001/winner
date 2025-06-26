@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 日誌檔案
+*.log
+logs/
+
+# 暫存檔案
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# 系統檔案
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 環境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# 大檔案和資料 (可選，如果不想同步)
+# StockData_Parquet/
+# *.parquet
+# *.csv
+
+# 模型檔案 (可選，如果不想同步)
+# *.joblib
+# *.pkl
+
+# 回測結果 (可選，如果不想同步)
+# runs/
+# charts_final_scenario_RSI60/
+
+# 自動產生的報告
+data_integrity_report.txt
+files_to_cleanup.txt
+candidate_files_for_cleanup.txt
+optimization_summary.json
+*_optimization_report.json
+
+# 其他
+*.zip
+*.rar
+*.7z 
