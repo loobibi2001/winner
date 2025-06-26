@@ -1,0 +1,28 @@
+# 核心資料處理
+pandas>=2.0.0
+numpy>=1.20.0
+
+# 機器學習
+scikit-learn>=1.0.0
+xgboost>=1.5.0
+
+# 超參數調優
+optuna>=3.0.0
+
+# 資料格式支援
+pyarrow>=10.0.0
+
+# Web介面
+streamlit>=1.20.0
+
+# 模型儲存
+joblib>=1.1.0
+
+# 進度條
+tqdm>=4.60.0
+
+# 技術分析 (可選，如果安裝成功)
+# TA-Lib>=0.4.0
+
+# 其他工具
+python-dateutil>=2.8.0 
